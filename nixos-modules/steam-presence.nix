@@ -234,8 +234,8 @@ in {
   config = mkIf cfg.enable {
     assertions = [
       {
-        assertion = cfg.steamApiKey != null;
-        message = "You must set programs.steam.presence.steamApiKey";
+        assertion = (cfg.steamApiKey != null) || (cfg.steamApiKeyFile != null);
+        message = "You must set either programs.steam.presence.steamApiKey or steamApiKeyFile";
       }
       {
         assertion = cfg.userIds != [];
@@ -243,16 +243,12 @@ in {
       }
     ];
 
-    # Place the base config in the runtime dir so it's next to main.py
-    home.file.".local/state/steam-presence/config.base.json".source = configBaseFile;
-
     systemd.user.services.steam-presence = {
-      Unit = {
-        Description = "Discord rich presence for Steam";
-        After = ["network-online.target"];
-      };
+      description = "Discord rich presence for Steam";
+      after = ["network-online.target"];
+      wantedBy = ["default.target"];
 
-      Service = {
+      serviceConfig = {
         Environment =
           [
             "STEAM_PRESENCE_RUNTIME_DIR=%h/.local/state/steam-presence"
@@ -262,71 +258,65 @@ in {
 
         WorkingDirectory = "%h/.local/state/steam-presence";
 
-        ExecStartPre =
-          [
-            "mkdir -p %h/.local/state/steam-presence"
-            ''${pkgs.bash}/bin/bash -c '[ -e %h/.local/state/steam-presence/main.py ] || cp -r ${cfg.package}/share/steam-presence/. %h/.local/state/steam-presence/' ''
-          ]
-          ++ (optional (cfg.cookiesFile != null) ''${pkgs.bash}/bin/bash -c 'cp -Lf ${toString cfg.cookiesFile} %h/.local/state/steam-presence/cookies.txt' '')
-          ++ (optional (cfg.gamesFile != null) ''${pkgs.bash}/bin/bash -c 'cp -Lf ${toString cfg.gamesFile} %h/.local/state/steam-presence/games.txt' '')
-          ++ (optional (cfg.iconsFile != null) ''${pkgs.bash}/bin/bash -c 'cp -Lf ${toString cfg.iconsFile} %h/.local/state/steam-presence/icons.txt' '')
-          ++ (optional (cfg.customGameIDsFile != null) ''${pkgs.bash}/bin/bash -c 'cp -Lf ${toString cfg.customGameIDsFile} %h/.local/state/steam-presence/customGameIDs.json' '')
-          ++ [
-            # Build config.json from config.base.json and optional secret files, atomically
-            ''
-              ${pkgs.bash}/bin/bash -c '
-              set -euo pipefail
-              cd %h/.local/state/steam-presence
-              in_base="config.base.json"
-              out_tmp="config.json.tmp"
-              out_final="config.json"
-              ${pkgs.python3}/bin/python - "$in_base" "$out_tmp" <<"PY"
-              import json, os, sys
-              base_path, out_path = sys.argv[1], sys.argv[2]
-              with open(base_path, "r") as f:
-                  data = json.load(f)
-
-              def ensure_path(d, keys):
-                  cur = d
-                  for k in keys:
-                      if k not in cur or not isinstance(cur[k], dict):
-                          cur[k] = {}
-                      cur = cur[k]
-                  return cur
-
-              steam_key_file = os.environ.get("STEAM_API_KEY_FILE")
-              if steam_key_file and os.path.isfile(steam_key_file):
-                  try:
-                      with open(steam_key_file, "r") as f:
-                          data["STEAM_API_KEY"] = f.read().strip()
-                  except Exception:
-                      pass
-
-              sgdb_key_file = os.environ.get("STEAM_GRID_API_KEY_FILE")
-              if sgdb_key_file and os.path.isfile(sgdb_key_file):
-                  try:
-                      ensure_path(data, ["COVER_ART", "STEAM_GRID_DB"])
-                      with open(sgdb_key_file, "r") as f:
-                          data["COVER_ART"]["STEAM_GRID_DB"]["STEAM_GRID_API_KEY"] = f.read().strip()
-                  except Exception:
-                      pass
-
-              with open(out_path, "w") as f:
-                  json.dump(data, f, indent=2)
-              PY
-              ${pkgs.coreutils}/bin/mv -f "$out_tmp" "$out_final"
-            ''
-          ];
-
         ExecStart = "${cfg.package}/bin/steam-presence";
 
         Restart = "on-failure";
         RestartSec = "10s";
       };
 
-      Install = {
-        WantedBy = ["default.target"];
-      };
+      preStart = ''
+        set -euo pipefail
+        RUNTIME_DIR="''${STEAM_PRESENCE_RUNTIME_DIR:-$HOME/.local/state/steam-presence}"
+        ${pkgs.coreutils}/bin/mkdir -p "$RUNTIME_DIR"
+        if [ ! -e "$RUNTIME_DIR/main.py" ]; then
+          ${pkgs.coreutils}/bin/cp -r ${cfg.package}/share/steam-presence/. "$RUNTIME_DIR/"
+        fi
+        ${pkgs.coreutils}/bin/cp -Lf ${toString configBaseFile} "$RUNTIME_DIR/config.base.json"
+        ${optionalString (cfg.cookiesFile != null) "${pkgs.coreutils}/bin/cp -Lf ${toString cfg.cookiesFile} \"$RUNTIME_DIR/cookies.txt\"\n"}
+        ${optionalString (cfg.gamesFile != null) "${pkgs.coreutils}/bin/cp -Lf ${toString cfg.gamesFile} \"$RUNTIME_DIR/games.txt\"\n"}
+        ${optionalString (cfg.iconsFile != null) "${pkgs.coreutils}/bin/cp -Lf ${toString cfg.iconsFile} \"$RUNTIME_DIR/icons.txt\"\n"}
+        ${optionalString (cfg.customGameIDsFile != null) "${pkgs.coreutils}/bin/cp -Lf ${toString cfg.customGameIDsFile} \"$RUNTIME_DIR/customGameIDs.json\"\n"}
+
+        cd "$RUNTIME_DIR"
+        in_base="config.base.json"
+        out_tmp="config.json.tmp"
+        out_final="config.json"
+        ${pkgs.python3}/bin/python - "$in_base" "$out_tmp" <<'PY'
+        import json, os, sys
+        base_path, out_path = sys.argv[1], sys.argv[2]
+        with open(base_path, "r") as f:
+            data = json.load(f)
+
+        def ensure_path(d, keys):
+            cur = d
+            for k in keys:
+                if k not in cur or not isinstance(cur[k], dict):
+                    cur[k] = {}
+                cur = cur[k]
+            return cur
+
+        steam_key_file = os.environ.get("STEAM_API_KEY_FILE")
+        if steam_key_file and os.path.isfile(steam_key_file):
+            try:
+                with open(steam_key_file, "r") as f:
+                    data["STEAM_API_KEY"] = f.read().strip()
+            except Exception:
+                pass
+
+        sgdb_key_file = os.environ.get("STEAM_GRID_API_KEY_FILE")
+        if sgdb_key_file and os.path.isfile(sgdb_key_file):
+            try:
+                ensure_path(data, ["COVER_ART", "STEAM_GRID_DB"])
+                with open(sgdb_key_file, "r") as f:
+                    data["COVER_ART"]["STEAM_GRID_DB"]["STEAM_GRID_API_KEY"] = f.read().strip()
+            except Exception:
+                pass
+
+        with open(out_path, "w") as f:
+            json.dump(data, f, indent=2)
+        PY
+        ${pkgs.coreutils}/bin/mv -f "$out_tmp" "$out_final"
+      '';
     };
   };
 }

@@ -30,10 +30,10 @@
       packages = {
         steam-presence = steam-presence-pkg;
       };
-
-      # You can also expose home-manager modules in the same way
-      homeManagerModules = {
-        steam-presence = import ./hm-modules/steam-presence.nix;
+    })
+    // {
+      nixosModules = {
+        steam-presence = import ./nixos-modules/steam-presence.nix;
       };
-    });
+    };
 }
